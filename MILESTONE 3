@@ -1,0 +1,149 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
+import sqlite3
+from twilio.twiml.voice_response import VoiceResponse
+import requests
+
+app = FastAPI()
+
+# ---------------- DATABASE ----------------
+
+def init_db():
+    conn = sqlite3.connect("hospital.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS patients(
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        treatment TEXT,
+        bill REAL,
+        status TEXT
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def fetch_patient(pid):
+    conn = sqlite3.connect("hospital.db")
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM patients WHERE id=?", (pid,))
+    row = cur.fetchone()
+    conn.close()
+
+    if row:
+        return {
+            "id": row[0],
+            "name": row[1],
+            "treatment": row[2],
+            "bill": row[3],
+            "status": row[4]
+        }
+    return None
+
+
+# Sample patient
+def insert_sample():
+    conn = sqlite3.connect("hospital.db")
+    conn.execute("""
+    INSERT OR REPLACE INTO patients
+    VALUES (?,?,?, ?,?)
+    """, ("101", "John", "General Checkup", 2500, "Pending"))
+    conn.commit()
+    conn.close()
+
+
+# ---------------- AI INTENT (HuggingFace) ----------------
+
+def detect_intent(text):
+
+    API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+
+    labels = [
+        "check bill",
+        "pay bill",
+        "insurance query",
+        "billing issue",
+        "exit"
+    ]
+
+    payload = {
+        "inputs": text,
+        "parameters": {"candidate_labels": labels}
+    }
+
+    response = requests.post(API_URL, json=payload)
+
+    if response.status_code == 200:
+        result = response.json()
+        return result["labels"][0]
+
+    return "unknown"
+
+
+# ---------------- TWILIO IVR ----------------
+
+@app.post("/voice")
+async def voice(request: Request):
+
+    form = await request.form()
+    speech = form.get("SpeechResult")
+
+    response = VoiceResponse()
+
+    if not speech:
+
+        gather = response.gather(
+            input="speech",
+            action="/voice",
+            speechTimeout="auto"
+        )
+
+        gather.say(
+            "Welcome to Smart Hospital billing system. "
+            "You can say check bill, pay bill, insurance query, or billing issue."
+        )
+
+        return Response(str(response), media_type="text/xml")
+
+    intent = detect_intent(speech)
+
+    if intent == "check bill":
+        patient = fetch_patient("101")
+
+        response.say(
+            f"Patient {patient['name']} total bill is {patient['bill']} rupees."
+        )
+
+    elif intent == "pay bill":
+        response.say(
+            "Your payment link has been sent to your registered mobile number."
+        )
+
+    elif intent == "insurance query":
+        response.say(
+            "Your insurance covers sixty percent of the treatment charges."
+        )
+
+    elif intent == "billing issue":
+        response.say(
+            "Your billing complaint has been registered. Our billing department will contact you."
+        )
+
+    elif intent == "exit":
+        response.say("Thank you for contacting Smart Hospital.")
+
+    else:
+        response.say("Sorry I did not understand. Please try again.")
+
+    return Response(str(response), media_type="text/xml")
+
+
+# ---------------- MAIN ----------------
+
+if __name__ == "__main__":
+    init_db()
+    insert_sample()
